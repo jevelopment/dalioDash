@@ -1,0 +1,26 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Runtime output and logs
+*.log
+server_backup/
+
+# Generated dashboard artifacts
+index.html
+macro_dashboard.png
+archive/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+_legacy_backups/
+_legacy_backups/
