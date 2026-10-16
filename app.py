@@ -137,10 +137,15 @@ def fetch_fred_hy_oas() -> pd.Series:
     return df
 
 
-def get_sp500_earnings_yield(spy_prices: pd.Series) -> tuple[pd.Series, str, bool]:
+def get_sp500_earnings_yield(index_prices: pd.Series) -> tuple[pd.Series, str, bool]:
     """
     Returns (earnings_yield_series, source_label, is_fallback).
-    Primary: multpl.com TTM EPS forward-filled to daily.
+
+    IMPORTANT: `index_prices` must be the S&P 500 *index level* (^GSPC), not SPY.
+    multpl.com publishes index-scale TTM EPS (~$298); SPY trades at ~1/10 the
+    index level, so dividing index EPS by SPY price inflates the yield ~10x.
+
+    Primary: multpl.com TTM EPS forward-filled to daily, divided by ^GSPC.
     Fallback: flat trailingPE from yfinance (scaled inverse-price proxy).
 
     Note: yfinance returns tz-aware indexes (America/New_York);
@@ -148,11 +153,11 @@ def get_sp500_earnings_yield(spy_prices: pd.Series) -> tuple[pd.Series, str, boo
     then restore the original tz on the output so the plot shares an axis
     with the TNX series.
     """
-    if spy_prices.empty:
+    if index_prices.empty:
         return pd.Series(dtype=float), "UNAVAILABLE", True
 
-    original_tz = spy_prices.index.tz
-    spy_naive = spy_prices.copy()
+    original_tz = index_prices.index.tz
+    spy_naive = index_prices.copy()  # keeps the name to minimize churn below
     spy_naive.index = spy_naive.index.tz_localize(None) if original_tz is not None else spy_naive.index
 
     # --- primary: multpl ---
@@ -169,7 +174,7 @@ def get_sp500_earnings_yield(spy_prices: pd.Series) -> tuple[pd.Series, str, boo
         if original_tz is not None:
             ey.index = ey.index.tz_localize(original_tz)
         log.info(f"Earnings yield: using real TTM EPS from multpl "
-                 f"(latest EPS={eps_q.iloc[-1]:.2f}, tz={original_tz})")
+                 f"(latest EPS={eps_q.iloc[-1]:.2f}, index=GSPC, tz={original_tz})")
         return ey, "S&P 500 Earnings Yield (TTM, multpl.com)", False
     except Exception as e:
         log.warning(f"multpl earnings scrape failed: {e}")
@@ -241,12 +246,13 @@ def run() -> None:
 
     # 1. Fetch each ticker exactly once
     log.info("Fetching market data...")
-    spy_6m = fetch_close("SPY")
-    tnx_6m = fetch_close("^TNX")
-    irx_6m = fetch_close("^IRX")   # 13-week T-bill yield, for curve slope
-    hyg_6m = fetch_close("HYG")
-    lqd_6m = fetch_close("LQD")
-    ief_6m = fetch_close("IEF")
+    spy_6m  = fetch_close("SPY")        # used for the price card only
+    gspc_6m = fetch_close("^GSPC")      # S&P 500 index — pairs with multpl's index-scale EPS
+    tnx_6m  = fetch_close("^TNX")
+    irx_6m  = fetch_close("^IRX")       # 13-week T-bill yield, for curve slope
+    hyg_6m  = fetch_close("HYG")
+    lqd_6m  = fetch_close("LQD")
+    ief_6m  = fetch_close("IEF")
 
     if spy_6m.empty:
         raise RuntimeError("SPY data unavailable — cannot build dashboard")
@@ -273,9 +279,11 @@ def run() -> None:
         hy_oas = pd.Series(dtype=float)
         hy_oas_ok = False
 
-    # 3. Earnings yield
+    # 3. Earnings yield — use ^GSPC (index level), NOT SPY.
+    # multpl publishes index-scale EPS (~$298); SPY trades at ~1/10 the index level.
+    # Dividing index EPS by SPY price inflates the yield ~10x. ^GSPC is the correct pairing.
     log.info("Computing S&P 500 earnings yield...")
-    earnings_yield, ey_label, ey_is_fallback = get_sp500_earnings_yield(spy_6m)
+    earnings_yield, ey_label, ey_is_fallback = get_sp500_earnings_yield(gspc_6m)
 
     # 4. Derived series
     # Primary credit-risk ratio: HYG / IEF (duration-matched, credit-isolated)
@@ -317,7 +325,10 @@ def run() -> None:
 
     # 5. Chart — 5 panels, with reserved space at the bottom for the endnote
     log.info("Rendering chart...")
-    fig, axes = plt.subplots(5, 1, figsize=(10, 17.5), sharex=True)
+    # sharex=False: each panel draws its own x-axis date labels.
+    # (With sharex=True, matplotlib hides all but the bottom row's labels,
+    # and fig.autofmt_xdate() re-hides them even after tick_params overrides.)
+    fig, axes = plt.subplots(5, 1, figsize=(10, 22), sharex=False)
     # Reserve ~7% of the figure height at the bottom for the footnote
     fig.subplots_adjust(bottom=0.08)
 
@@ -406,7 +417,13 @@ def run() -> None:
     axes[4].grid(True, linestyle="--", alpha=0.6)
     axes[4].legend(loc="upper left", fontsize=8)
 
-    fig.autofmt_xdate()
+    # Rotate x-axis tick labels on every panel.
+    # NOTE: do NOT use fig.autofmt_xdate() — it is designed to hide
+    # all but the bottom panel's labels and ignores sharex=False.
+    for ax in axes:
+        for label in ax.get_xticklabels():
+            label.set_rotation(30)
+            label.set_ha("right")
 
     # Footnote at the bottom of the figure — only if HY OAS loaded
     if hy_oas_ok and not hy_oas.empty:
@@ -420,7 +437,13 @@ def run() -> None:
                       linewidth=0.8),
         )
 
-    plt.tight_layout(rect=(0, 0.07, 1, 1))  # leave room for the footnote
+    # Explicit layout instead of tight_layout — the latter collapses
+    # the spacing we need for per-panel date labels + the footnote box.
+    fig.subplots_adjust(
+        left=0.08, right=0.97,
+        top=0.97, bottom=0.08,   # bottom reserves room for the endnote
+        hspace=0.55,             # vertical gap between panels
+    )
     savefig_atomic(fig, os.path.join(BASE_DIR, "macro_dashboard.png"))
     plt.close(fig)
 
